@@ -4,7 +4,6 @@ import os
 import pickle
 import csv
 from sentence_transformers import SentenceTransformer, util
-from results import merge_results_with_framework1
 
 def process(input_files):
     for idx, input_file in enumerate(input_files, start=1):
