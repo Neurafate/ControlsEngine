@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Upload Files</title>
+</head>
+<body>
+    <h1>Upload Files for Processing</h1>
+    <form action="/upload" method="post" enctype="multipart/form-data">
+        <label for="frame1">User Org Framework (frame1.xlsx):</label><br>
+        <input type="file" id="frame1" name="frame1"><br><br>
+        <label for="frame2">Service Org Framework (frame2.xlsx):</label><br>
+        <input type="file" id="frame2" name="frame2"><br><br>
+        <label for="test1">Test File 1 (test1.xlsx):</label><br>
+        <input type="file" id="test1" name="test1"><br><br>
+        <label for="test2">Test File 2 (test2.xlsx):</label><br>
+        <input type="file" id="test2" name="test2"><br><br>
+        <input type="submit" value="Upload and Process">
+    </form>
+</body>
+</html>
