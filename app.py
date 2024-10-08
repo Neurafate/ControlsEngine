@@ -1,12 +1,14 @@
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify, url_for
 import time
 import pandas as pd
 import os
 import pickle
 import csv
 from sentence_transformers import SentenceTransformer, util
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 
 # Define the absolute paths to the model and vectorizer files
 BASE_DIR = app.root_path
@@ -268,13 +270,26 @@ def process_files_endpoint():
                 comparison_csv = os.path.join(BASE_DIR, 'control_comparisons.csv')
                 output_csv_path = os.path.join(BASE_DIR, 'framework1_with_results.csv')
                 merged_df = merge_results_with_framework1(original_csv_path, comparison_csv, output_csv_path)
+                response_json = {
+                    'data': merged_df.to_json(orient='records'),
+                    'download_url': url_for('download_csv', filename='framework1_with_results.csv')
+                }
 
                 # Send the final merged file to the user
-                return str(merged_df)
+                return jsonify(response_json)
             except Exception as e:
                 return jsonify({'error': str(e)}), 500
         else:
             return jsonify({'error': 'Invalid files uploaded.'}), 400
+        
+@app.route('/download/<filename>', methods=['GET'])
+def download_csv(filename):
+    """Allow users to download the processed CSV file."""
+    file_path = os.path.join(BASE_DIR, filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, as_attachment=True)
+    else:
+        return jsonify({'error': 'File not found.'}), 404       
 
 if __name__ == '__main__':
     app.run(debug=True)
