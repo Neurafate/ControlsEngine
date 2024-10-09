@@ -4,6 +4,8 @@ import pandas as pd
 import os
 import pickle
 import csv
+import faiss
+import numpy as np
 from sentence_transformers import SentenceTransformer, util
 from flask_cors import CORS
 
@@ -23,6 +25,7 @@ with open(VECTOR_PATH, 'rb') as f:
     vectorizer = pickle.load(f)
 
 def process(input_files):
+    dfs = []
     for idx, input_file in enumerate(input_files, start=1):
         # Read the Excel file
         df = pd.read_excel(input_file)
@@ -31,11 +34,11 @@ def process(input_files):
         df_control = df.iloc[:, [2]].copy()  # iloc[:, 2] selects the third column
         df_control.columns = ['control']     # Rename it to 'control'
         
-        # Create a unique output file name (test1.xlsx, test2.xlsx, etc.)
-        output_file = os.path.join(BASE_DIR, f'test{idx}.xlsx')
+        # Add the resulting DataFrame to the list
+        dfs.append(df_control)
         
-        # Save the result to a new Excel file
-        df_control.to_excel(output_file, index=False)
+    # Return the list of DataFrames
+    return dfs
 
 def predict_category(control):
     """Predict the category for a given control value."""
@@ -43,86 +46,70 @@ def predict_category(control):
     control_tfidf = vectorizer.transform([combined_features])
     return classification_model.predict(control_tfidf)[0]
 
-def classify_file(file_path):
-    """Classify the 'control' column of the uploaded file."""
-    # Read file based on extension
-    if file_path.lower().endswith('.csv'):
-        data = pd.read_csv(file_path)
-    elif file_path.lower().endswith('.xlsx'):
-        data = pd.read_excel(file_path)
-    else:
-        raise ValueError("Unsupported file format")
-
+def classify_df(df):
+    """Classify the 'control' column of the given DataFrame."""
+    
     # Ensure the 'control' column is present
-    if 'control' not in data.columns:
-        raise ValueError(f'Missing "control" column in the file {file_path}')
+    if 'control' not in df.columns:
+        raise ValueError(f'Missing "control" column in the DataFrame')
 
     # Apply classification
-    data['predicted_label'] = data['control'].apply(predict_category)
+    df['predicted_label'] = df['control'].apply(predict_category)  # Assuming predict_category is a predefined function
 
-    # Save classified data as CSV
-    base_name = os.path.basename(file_path).rsplit('.', 1)[0]
-    csv_filename = f'classified_{base_name}.csv'
-    csv_file_path = os.path.join(BASE_DIR, csv_filename)
-    data.to_csv(csv_file_path, index=False, quoting=csv.QUOTE_MINIMAL)
+    return df  # Return the classified DataFrame
 
-    return csv_file_path
+def process_dfs(dfs):
+    """Process and classify two DataFrames."""
+    if len(dfs) != 2:
+        raise ValueError("Two DataFrames are required for processing.")
 
-def process_files(file_paths):
-    """Process and classify two uploaded files."""
-    if len(file_paths) != 2:
-        raise ValueError("Two files are required for processing.")
-
-    classified_files = []
-    for file_path in file_paths:
+    classified_dfs = []
+    for df in dfs:
         try:
-            classified_file = classify_file(file_path)
-            classified_files.append(classified_file)
+            classified_df = classify_df(df)  # Assuming classify_df is the function to classify a DataFrame
+            classified_dfs.append(classified_df)
         except Exception as e:
-            print(f"Error processing {file_path}: {e}")
+            print(f"Error processing DataFrame: {e}")
 
-    return classified_files
+    return classified_dfs
 
-def group_controls_by_label(sheet1_path, sheet2_path):
+def group_controls_by_label(df1, df2):
     """
-    Load and group controls by their predicted labels from two CSV files.
+    Load and group controls by their predicted labels from two DataFrames.
     Returns two dictionaries with controls grouped by labels.
     """
-    # Load the CSV files into pandas DataFrames
-    sheet1 = pd.read_csv(sheet1_path)
-    sheet2 = pd.read_csv(sheet2_path)
 
-    # Check for the required columns in both sheets
+    # Check for the required columns in both DataFrames
     required_columns = ['predicted_label', 'control']
-    if not all(col in sheet1.columns for col in required_columns):
-        raise ValueError(f"Missing required columns in sheet1. Expected columns: {required_columns}")
-    if not all(col in sheet2.columns for col in required_columns):
-        raise ValueError(f"Missing required columns in sheet2. Expected columns: {required_columns}")
+    if not all(col in df1.columns for col in required_columns):
+        raise ValueError(f"Missing required columns in DataFrame 1. Expected columns: {required_columns}")
+    if not all(col in df2.columns for col in required_columns):
+        raise ValueError(f"Missing required columns in DataFrame 2. Expected columns: {required_columns}")
 
     # Initialize dictionaries to store controls grouped by labels
-    grouped_controls_sheet1 = {}
-    grouped_controls_sheet2 = {}
+    grouped_controls_df1 = {}
+    grouped_controls_df2 = {}
 
-    # Group controls in sheet1 by their labels
-    for _, row in sheet1.iterrows():
+    # Group controls in df1 by their labels
+    for _, row in df1.iterrows():
         label = row['predicted_label']
         control = row['control']
         
-        if label not in grouped_controls_sheet1:
-            grouped_controls_sheet1[label] = []
-        grouped_controls_sheet1[label].append(control)
+        if label not in grouped_controls_df1:
+            grouped_controls_df1[label] = []
+        grouped_controls_df1[label].append(control)
 
-    # Group controls in sheet2 by their labels
-    for _, row in sheet2.iterrows():
+    # Group controls in df2 by their labels
+    for _, row in df2.iterrows():
         label = row['predicted_label']
         control = row['control']
         
-        if label not in grouped_controls_sheet2:
-            grouped_controls_sheet2[label] = []
-        grouped_controls_sheet2[label].append(control)
+        if label not in grouped_controls_df2:
+            grouped_controls_df2[label] = []
+        grouped_controls_df2[label].append(control)
 
     # Return the two dictionaries
-    return grouped_controls_sheet1, grouped_controls_sheet2
+    return grouped_controls_df1, grouped_controls_df2
 
 def compute_embeddings(controls, embedding_model):
     """
@@ -159,8 +146,8 @@ def compare_controls(controls1, embeddings1, controls2, embeddings2, threshold_f
 
         if best_match_control2:
             results.append({
-                'Control from F1': controls1[i],
-                'Best Match from F2': best_match_control2,
+                'Control from User Org Framework': controls1[i],
+                'Best Match from Service Org Framework': best_match_control2,
                 'Similarity Score': best_match_score,
                 'Match Type': match_type
             })
@@ -169,41 +156,92 @@ def compare_controls(controls1, embeddings1, controls2, embeddings2, threshold_f
     results_df = pd.DataFrame(results)
     return results_df
 
-def run_comparison(sheet1_path, sheet2_path):
+def run_comparison(df1, df2):
     """
-    Main function to compare controls from two CSV files and store the results
+    Main function to compare controls from two DataFrames and store the results
     as a DataFrame.
     """
     # Step 1: Group controls by label
-    grouped_controls_sheet1, grouped_controls_sheet2 = group_controls_by_label(sheet1_path, sheet2_path)
+    grouped_controls_df1, grouped_controls_df2 = group_controls_by_label(df1, df2)  # Assuming group_controls_by_label works with DataFrames
 
     # Load a pre-trained model
     embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
     all_results_df = pd.DataFrame()
 
-    # Step 2: Compare controls for each matching label between the two sheets
-    for label in grouped_controls_sheet1:
-        if label in grouped_controls_sheet2:
-            controls1 = grouped_controls_sheet1[label]
-            controls2 = grouped_controls_sheet2[label]
+    # Step 2: Compare controls for each matching label between the two DataFrames
+    for label in grouped_controls_df1:
+        if label in grouped_controls_df2:
+            controls1 = grouped_controls_df1[label]
+            controls2 = grouped_controls_df2[label]
 
             # Step 3: Compute embeddings for both sets of controls
-            embeddings1 = compute_embeddings(controls1, embedding_model)
+            embeddings1 = compute_embeddings(controls1, embedding_model)  # Assuming compute_embeddings is defined
             embeddings2 = compute_embeddings(controls2, embedding_model)
 
             # Step 4: Compare embeddings and get results DataFrame
-            results_df = compare_controls(controls1, embeddings1, controls2, embeddings2)
+            results_df = compare_controls(controls1, embeddings1, controls2, embeddings2)  # Assuming compare_controls is defined
 
             # Append to overall results
             all_results_df = pd.concat([all_results_df, results_df], ignore_index=True)
 
-    # Step 5: Save results as a CSV file
-    all_results_df.to_csv(os.path.join(BASE_DIR, 'control_comparisons.csv'), index=False)
-    print("Comparison complete. Results saved to 'control_comparisons.csv'.")
+    # Step 5: Optionally, show the DataFrame output or return it instead of saving to a CSV
+    print("Comparison complete.")
+    
+    return all_results_df  # Return the DataFrame for further use
 
-    # Step 6: Optionally, show the DataFrame output
-    print(all_results_df)
+def run_comparison_faiss(df1, df2, embedding_model):
+    """
+    Function to compare controls using FAISS for nearest neighbor search instead of SBERT cosine similarity.
+    """
+    # Step 1: Group controls by label
+    grouped_controls_df1, grouped_controls_df2 = group_controls_by_label(df1, df2)
+
+    all_results_df = pd.DataFrame()
+    results=pd.DataFrame()
+    # Step 2: Compare controls for each matching label between the two DataFrames
+    for label in grouped_controls_df1:
+        if label in grouped_controls_df2:
+            controls1 = grouped_controls_df1[label]
+            controls2 = grouped_controls_df2[label]
+
+            # Step 3: Compute embeddings for both sets of controls using SBERT or another model
+            embeddings1 = compute_embeddings(controls1, embedding_model)
+            embeddings2 = compute_embeddings(controls2, embedding_model)
+
+            # Step 4: Set up FAISS index
+            dim = embeddings1.shape[1]  # Assuming embeddings have the same dimension
+            index = faiss.IndexFlatL2(dim)  # L2 distance (Euclidean)
+
+            # Step 5: Add embeddings from controls2 to the FAISS index
+            index.add(embeddings2.cpu().detach().numpy())  # Assuming embeddings2 is a tensor; convert to numpy
+
+            # Step 6: Perform search for the nearest neighbor for each control in controls1
+            D, I = index.search(embeddings1.cpu().detach().numpy(), 1)  # Search for 1 nearest neighbor
+
+            # Step 7: Collect results based on FAISS results
+            for i, control1 in enumerate(controls1):
+                best_match_index = I[i][0]  # Index of the best match in controls2
+                best_match_score = 1 - (D[i][0] / 2)  # Convert L2 distance to similarity score
+                
+                match_type = 'No Match'
+                if best_match_score >= 0.8:
+                    match_type = 'Full Match'
+                elif best_match_score >= 0.5:
+                    match_type = 'Partial Match'
+
+                results.append({
+                    'Control from User Org Framework': control1,
+                    'Best Match from Service Org Framework': controls2[best_match_index],
+                    'Similarity Score': best_match_score,
+                    'Match Type': match_type
+                })
+
+            # Append to overall results
+            all_results_df = pd.concat([all_results_df, pd.DataFrame(results)], ignore_index=True)
+
+    # Step 8: Return the final DataFrame with comparison results
+    return all_results_df
 
 def merge_results_with_framework1(original_framework1_path, comparison_results_path, output_path):
     """
@@ -211,30 +249,37 @@ def merge_results_with_framework1(original_framework1_path, comparison_results_p
     Saves the merged result as a new CSV file.
     """
     # Step 1: Load the original framework 1 CSV
-    framework1_df = pd.read_csv(original_framework1_path)
+    framework1_df = original_framework1_path
 
     # Step 2: Load the comparison results CSV
-    comparison_results_df = pd.read_csv(comparison_results_path)
+    comparison_results_df = comparison_results_path
 
     # Step 3: Merge the results into the original framework 1 DataFrame
     # Use 'Control from F1' from comparison results to match the 'Requirement' column in framework 1
     merged_df = framework1_df.merge(
-        comparison_results_df[['Control from F1', 'Best Match from F2', 'Similarity Score', 'Match Type']],
-        left_on='Requirement', right_on='Control from F1',
+        comparison_results_df[['Control from User Org Framework', 'Best Match from Service Org Framework', 'Similarity Score', 'Match Type']],
+        left_on='Requirement', right_on='Control from User Org Framework',
         how='left'
     )
-    # Save the merged DataFrame
+    merged_df = merged_df.drop(columns=['Control from User Org Framework'])
+
+    # Step 5: Save the merged DataFrame
     merged_df.to_csv(output_path, index=False)
     return merged_df
 
 @app.route('/process', methods=['POST'])
 def process_files_endpoint():
     if request.method == 'POST':
+        start_time = time.time()  # Start time
+
         # Check if the files are part of the request
         if 'frame1' not in request.files or 'frame2' not in request.files:
             return jsonify({'error': 'Both "frame1" and "frame2" files are required.'}), 400
         file1 = request.files['frame1']
         file2 = request.files['frame2']
+        # Get user choice from the form data
+#        user_choice = int(request.form.get('faissChoice', 0))  # Default is 0 for not using FAISS
+
         # If user does not select file, browser may submit an empty part without filename
         if file1.filename == '' or file2.filename == '':
             return jsonify({'error': 'No file selected for uploading.'}), 400
@@ -247,33 +292,37 @@ def process_files_endpoint():
                 file2.save(file2_path)
                 # Process the files
                 frameworks = [file1_path, file2_path]
-                process(frameworks)
-
-                # Paths for test files
-                test1_path = os.path.join(BASE_DIR, 'test1.xlsx')
-                test2_path = os.path.join(BASE_DIR, 'test2.xlsx')
+                test_DFs = process(frameworks)
 
                 # Process files and classify
-                classified_files = process_files([test1_path, test2_path])
+                classified_DFs = process_dfs(test_DFs)
 
                 # Run comparison
-                sheet1 = classified_files[0]
-                sheet2 = classified_files[1]
-                run_comparison(sheet1_path=sheet1, sheet2_path=sheet2)
+                classified_DF1 = classified_DFs[0]
+                classified_DF2 = classified_DFs[1]
+
+                user_choice = 0  # Default is 0 for not using FAISS
+                if user_choice == 0:
+                    Compared_DF = run_comparison(classified_DF1, classified_DF2)
+                else:
+                    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+                    Compared_DF = run_comparison_faiss(classified_DF1, classified_DF2, embedding_model)
 
                 # Save original frame1 as original.csv
-                df = pd.read_excel(file1_path)
-                original_csv_path = os.path.join(BASE_DIR, 'original.csv')
-                df.to_csv(original_csv_path, index=False)
+                Original_DF = pd.read_excel(file1_path)
 
                 # Merge results
-                comparison_csv = os.path.join(BASE_DIR, 'control_comparisons.csv')
                 output_csv_path = os.path.join(BASE_DIR, 'framework1_with_results.csv')
-                merged_df = merge_results_with_framework1(original_csv_path, comparison_csv, output_csv_path)
+                merged_df = merge_results_with_framework1(Original_DF, Compared_DF, output_csv_path)
                 response_json = {
                     'data': merged_df.to_json(orient='records'),
                     'download_url': url_for('download_csv', filename='framework1_with_results.csv')
                 }
+
+                end_time = time.time()  # End time
+                processing_time = end_time - start_time  # Calculate time taken
+                print(processing_time)
+                response_json['processing_time'] = f"{processing_time:.2f} seconds"  # Add time to response
 
                 # Send the final merged file to the user
                 return jsonify(response_json)
