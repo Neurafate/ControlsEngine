@@ -197,8 +197,7 @@ def run_comparison_faiss(df1, df2, embedding_model):
     # Step 1: Group controls by label
     grouped_controls_df1, grouped_controls_df2 = group_controls_by_label(df1, df2)
 
-    all_results_df = pd.DataFrame()
-    results=pd.DataFrame()
+    all_results_df = pd.DataFrame()  # To store final results
     # Step 2: Compare controls for each matching label between the two DataFrames
     for label in grouped_controls_df1:
         if label in grouped_controls_df2:
@@ -218,8 +217,9 @@ def run_comparison_faiss(df1, df2, embedding_model):
 
             # Step 6: Perform search for the nearest neighbor for each control in controls1
             D, I = index.search(embeddings1.cpu().detach().numpy(), 1)  # Search for 1 nearest neighbor
-
+            
             # Step 7: Collect results based on FAISS results
+            label_results = []  # Temporary list to store results for this label
             for i, control1 in enumerate(controls1):
                 best_match_index = I[i][0]  # Index of the best match in controls2
                 best_match_score = 1 - (D[i][0] / 2)  # Convert L2 distance to similarity score
@@ -230,16 +230,17 @@ def run_comparison_faiss(df1, df2, embedding_model):
                 elif best_match_score >= 0.5:
                     match_type = 'Partial Match'
 
-                results.append({
+                # Append each result as a dictionary to the label_results list
+                label_results.append({
                     'Control from User Org Framework': control1,
                     'Best Match from Service Org Framework': controls2[best_match_index],
                     'Similarity Score': best_match_score,
                     'Match Type': match_type
                 })
 
-            # Append to overall results
-            all_results_df = pd.concat([all_results_df, pd.DataFrame(results)], ignore_index=True)
-
+            # Convert list of dicts to DataFrame and concatenate to all_results_df
+            all_results_df = pd.concat([all_results_df, pd.DataFrame(label_results)], ignore_index=True)
+    
     # Step 8: Return the final DataFrame with comparison results
     return all_results_df
 
