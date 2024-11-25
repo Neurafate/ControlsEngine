@@ -1,280 +1,246 @@
-from flask import Flask, request, send_file, jsonify
-import time
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
 import pandas as pd
-import os
-import pickle
-import csv
+import numpy as np
+from thefuzz import fuzz
+import nltk
+import string
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
 from sentence_transformers import SentenceTransformer, util
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import os
+import time
+import shutil
 
 app = Flask(__name__)
+CORS(app)
 
-# Define the absolute paths to the model and vectorizer files
-BASE_DIR = app.root_path
-MODEL_PATH = os.path.join(BASE_DIR, 'model_weights.pkl')
-VECTOR_PATH = os.path.join(BASE_DIR, 'vectorizer.pkl')
+# Download necessary NLTK data files (only needed once)
+nltk.download('stopwords')
+nltk.download('wordnet')
+nltk.download('omw-1.4')
 
-# Load the model and vectorizer
-with open(MODEL_PATH, 'rb') as f:
-    classification_model = pickle.load(f)
+# Initialize Sentence Transformer with a better model
+model = SentenceTransformer('all-mpnet-base-v2')
 
-with open(VECTOR_PATH, 'rb') as f:
-    vectorizer = pickle.load(f)
+# Initialize Lemmatizer and Stop Words
+lemmatizer = WordNetLemmatizer()
+stop_words = set(stopwords.words('english'))
 
-def process(input_files):
-    for idx, input_file in enumerate(input_files, start=1):
-        # Read the Excel file
-        df = pd.read_excel(input_file)
-        
-        # Select only the third column (column C) and rename it to 'control'
-        df_control = df.iloc[:, [2]].copy()  # iloc[:, 2] selects the third column
-        df_control.columns = ['control']     # Rename it to 'control'
-        
-        # Create a unique output file name (test1.xlsx, test2.xlsx, etc.)
-        output_file = os.path.join(BASE_DIR, f'test{idx}.xlsx')
-        
-        # Save the result to a new Excel file
-        df_control.to_excel(output_file, index=False)
+# Directories to save uploaded files and outputs
+UPLOAD_FOLDER = 'uploads'
+OUTPUT_FOLDER = 'output'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-def predict_category(control):
-    """Predict the category for a given control value."""
-    combined_features = f"{control}"
-    control_tfidf = vectorizer.transform([combined_features])
-    return classification_model.predict(control_tfidf)[0]
-
-def classify_file(file_path):
-    """Classify the 'control' column of the uploaded file."""
-    # Read file based on extension
-    if file_path.lower().endswith('.csv'):
-        data = pd.read_csv(file_path)
-    elif file_path.lower().endswith('.xlsx'):
-        data = pd.read_excel(file_path)
-    else:
-        raise ValueError("Unsupported file format")
-
-    # Ensure the 'control' column is present
-    if 'control' not in data.columns:
-        raise ValueError(f'Missing "control" column in the file {file_path}')
-
-    # Apply classification
-    data['predicted_label'] = data['control'].apply(predict_category)
-
-    # Save classified data as CSV
-    base_name = os.path.basename(file_path).rsplit('.', 1)[0]
-    csv_filename = f'classified_{base_name}.csv'
-    csv_file_path = os.path.join(BASE_DIR, csv_filename)
-    data.to_csv(csv_file_path, index=False, quoting=csv.QUOTE_MINIMAL)
-
-    return csv_file_path
-
-def process_files(file_paths):
-    """Process and classify two uploaded files."""
-    if len(file_paths) != 2:
-        raise ValueError("Two files are required for processing.")
-
-    classified_files = []
-    for file_path in file_paths:
-        try:
-            classified_file = classify_file(file_path)
-            classified_files.append(classified_file)
-        except Exception as e:
-            print(f"Error processing {file_path}: {e}")
-
-    return classified_files
-
-def group_controls_by_label(sheet1_path, sheet2_path):
-    """
-    Load and group controls by their predicted labels from two CSV files.
-    Returns two dictionaries with controls grouped by labels.
-    """
-    # Load the CSV files into pandas DataFrames
-    sheet1 = pd.read_csv(sheet1_path)
-    sheet2 = pd.read_csv(sheet2_path)
-
-    # Check for the required columns in both sheets
-    required_columns = ['predicted_label', 'control']
-    if not all(col in sheet1.columns for col in required_columns):
-        raise ValueError(f"Missing required columns in sheet1. Expected columns: {required_columns}")
-    if not all(col in sheet2.columns for col in required_columns):
-        raise ValueError(f"Missing required columns in sheet2. Expected columns: {required_columns}")
-
-    # Initialize dictionaries to store controls grouped by labels
-    grouped_controls_sheet1 = {}
-    grouped_controls_sheet2 = {}
-
-    # Group controls in sheet1 by their labels
-    for _, row in sheet1.iterrows():
-        label = row['predicted_label']
-        control = row['control']
-        
-        if label not in grouped_controls_sheet1:
-            grouped_controls_sheet1[label] = []
-        grouped_controls_sheet1[label].append(control)
-
-    # Group controls in sheet2 by their labels
-    for _, row in sheet2.iterrows():
-        label = row['predicted_label']
-        control = row['control']
-        
-        if label not in grouped_controls_sheet2:
-            grouped_controls_sheet2[label] = []
-        grouped_controls_sheet2[label].append(control)
-
-    # Return the two dictionaries
-    return grouped_controls_sheet1, grouped_controls_sheet2
-
-def compute_embeddings(controls, embedding_model):
-    """
-    Generate embeddings for a list of controls using a pre-trained model.
-    """
-    embeddings = embedding_model.encode(controls, convert_to_tensor=True)
-    return embeddings
-
-def compare_controls(controls1, embeddings1, controls2, embeddings2, threshold_full=0.8, threshold_partial=0.5):
-    """
-    Compare the controls from two different frameworks based on cosine similarity
-    of their embeddings. Returns a DataFrame showing matched controls.
-    """
-    cosine_scores = util.cos_sim(embeddings1, embeddings2)
-    results = []
-
-    for i in range(len(controls1)):
-        best_match_score = -1
-        best_match_control2 = None
-        match_type = 'No Match'
-
-        for j in range(len(controls2)):
-            score = cosine_scores[i][j].item()
-
-            # Find the best match for control1[i] in controls2
-            if score >= threshold_full:
-                best_match_score = score
-                best_match_control2 = controls2[j]
-                match_type = 'Full Match'
-            elif score >= threshold_partial and score > best_match_score:
-                best_match_score = score
-                best_match_control2 = controls2[j]
-                match_type = 'Partial Match'
-
-        if best_match_control2:
-            results.append({
-                'Control from F1': controls1[i],
-                'Best Match from F2': best_match_control2,
-                'Similarity Score': best_match_score,
-                'Match Type': match_type
-            })
-
-    # Convert to DataFrame
-    results_df = pd.DataFrame(results)
-    return results_df
-
-def run_comparison(sheet1_path, sheet2_path):
-    """
-    Main function to compare controls from two CSV files and store the results
-    as a DataFrame.
-    """
-    # Step 1: Group controls by label
-    grouped_controls_sheet1, grouped_controls_sheet2 = group_controls_by_label(sheet1_path, sheet2_path)
-
-    # Load a pre-trained model
-    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-
-    all_results_df = pd.DataFrame()
-
-    # Step 2: Compare controls for each matching label between the two sheets
-    for label in grouped_controls_sheet1:
-        if label in grouped_controls_sheet2:
-            controls1 = grouped_controls_sheet1[label]
-            controls2 = grouped_controls_sheet2[label]
-
-            # Step 3: Compute embeddings for both sets of controls
-            embeddings1 = compute_embeddings(controls1, embedding_model)
-            embeddings2 = compute_embeddings(controls2, embedding_model)
-
-            # Step 4: Compare embeddings and get results DataFrame
-            results_df = compare_controls(controls1, embeddings1, controls2, embeddings2)
-
-            # Append to overall results
-            all_results_df = pd.concat([all_results_df, results_df], ignore_index=True)
-
-    # Step 5: Save results as a CSV file
-    all_results_df.to_csv(os.path.join(BASE_DIR, 'control_comparisons.csv'), index=False)
-    print("Comparison complete. Results saved to 'control_comparisons.csv'.")
-
-    # Step 6: Optionally, show the DataFrame output
-    print(all_results_df)
-
-def merge_results_with_framework1(original_framework1_path, comparison_results_path, output_path):
-    """
-    Merges the comparison results back into the original framework 1 dataset.
-    Saves the merged result as a new CSV file.
-    """
-    # Step 1: Load the original framework 1 CSV
-    framework1_df = pd.read_csv(original_framework1_path)
-
-    # Step 2: Load the comparison results CSV
-    comparison_results_df = pd.read_csv(comparison_results_path)
-
-    # Step 3: Merge the results into the original framework 1 DataFrame
-    # Use 'Control from F1' from comparison results to match the 'Requirement' column in framework 1
-    merged_df = framework1_df.merge(
-        comparison_results_df[['Control from F1', 'Best Match from F2', 'Similarity Score', 'Match Type']],
-        left_on='Requirement', right_on='Control from F1',
-        how='left'
-    )
-    # Save the merged DataFrame
-    merged_df.to_csv(output_path, index=False)
-    return merged_df
+# Text Preprocessing Function
+def preprocess_text(text):
+    if pd.isnull(text):
+        return ''
+    text = str(text).lower()
+    text = text.translate(str.maketrans('', '', string.punctuation))
+    words = text.split()
+    words = [lemmatizer.lemmatize(word) for word in words]
+    return ' '.join(words)
 
 @app.route('/process', methods=['POST'])
-def process_files_endpoint():
-    if request.method == 'POST':
-        # Check if the files are part of the request
-        if 'frame1' not in request.files or 'frame2' not in request.files:
-            return jsonify({'error': 'Both "frame1" and "frame2" files are required.'}), 400
-        file1 = request.files['frame1']
-        file2 = request.files['frame2']
-        # If user does not select file, browser may submit an empty part without filename
-        if file1.filename == '' or file2.filename == '':
-            return jsonify({'error': 'No file selected for uploading.'}), 400
-        if file1 and file2:
-            try:
-                # Save uploaded files to disk
-                file1_path = os.path.join(BASE_DIR, 'uploaded_frame1.xlsx')
-                file2_path = os.path.join(BASE_DIR, 'uploaded_frame2.xlsx')
-                file1.save(file1_path)
-                file2.save(file2_path)
-                # Process the files
-                frameworks = [file1_path, file2_path]
-                process(frameworks)
+def process_files():
+    start_time = time.time()
+    print("Received request to process files")
 
-                # Paths for test files
-                test1_path = os.path.join(BASE_DIR, 'test1.xlsx')
-                test2_path = os.path.join(BASE_DIR, 'test2.xlsx')
+    # Clear output folder before saving new results
+    shutil.rmtree(OUTPUT_FOLDER)
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-                # Process files and classify
-                classified_files = process_files([test1_path, test2_path])
+    # Get uploaded files and Top-K value
+    file1 = request.files.get('frame1')
+    file2 = request.files.get('frame2')
+    top_k = int(request.form.get('top_k', 6))  # Default to 6 if not provided
+    print(f"Top-K value set to: {top_k}")
 
-                # Run comparison
-                sheet1 = classified_files[0]
-                sheet2 = classified_files[1]
-                run_comparison(sheet1_path=sheet1, sheet2_path=sheet2)
+    if not file1 or not file2:
+        print("Error: Both files are required")
+        return jsonify({"error": "Both files are required"}), 400
 
-                # Save original frame1 as original.csv
-                df = pd.read_excel(file1_path)
-                original_csv_path = os.path.join(BASE_DIR, 'original.csv')
-                df.to_csv(original_csv_path, index=False)
+    # Save uploaded files
+    path1 = os.path.join(UPLOAD_FOLDER, file1.filename)
+    path2 = os.path.join(UPLOAD_FOLDER, file2.filename)
+    file1.save(path1)
+    file2.save(path2)
+    print(f"Files saved: {path1}, {path2}")
 
-                # Merge results
-                comparison_csv = os.path.join(BASE_DIR, 'control_comparisons.csv')
-                output_csv_path = os.path.join(BASE_DIR, 'framework1_with_results.csv')
-                merged_df = merge_results_with_framework1(original_csv_path, comparison_csv, output_csv_path)
+    # Load the Excel Files
+    df1 = pd.read_excel(path1)
+    df2 = pd.read_excel(path2)
 
-                # Send the final merged file to the user
-                return str(merged_df)
-            except Exception as e:
-                return jsonify({'error': str(e)}), 500
+    # Forward-fill missing 'Domain' and 'Sub-Domain' values due to merged cells
+    df1['Domain'] = df1['Domain'].fillna(method='ffill')
+    df2['Domain'] = df2['Domain'].fillna(method='ffill')
+    df1['Sub-Domain'] = df1['Sub-Domain'].fillna(method='ffill')
+    df2['Sub-Domain'] = df2['Sub-Domain'].fillna(method='ffill')
+
+    # Combine and Preprocess Text Columns
+    df1['Combined_Text'] = df1['Domain'].astype(str) + ' ' + df1['Sub-Domain'].astype(str) + ' ' + df1['Control'].astype(str)
+    df2['Combined_Text'] = df2['Domain'].astype(str) + ' ' + df2['Sub-Domain'].astype(str) + ' ' + df2['Control'].astype(str)
+
+    df1['Processed_Control'] = df1['Combined_Text'].apply(preprocess_text)
+    df2['Processed_Control'] = df2['Combined_Text'].apply(preprocess_text)
+
+    # Match Domains Using Semantic Similarity
+    domains1 = df1['Domain'].dropna().unique().tolist()
+    domains2 = df2['Domain'].dropna().unique().tolist()
+
+    # Define manual domain mappings (update as needed)
+    manual_domain_mapping = {
+        'Security Incident Management': 'Resilience',
+        'Application & Software': 'Secure Software Development Lifecycle',
+        # Add more mappings as needed
+    }
+
+    # Define domain descriptions for better context
+    domain_descriptions = {
+        'Security Incident Management': 'Management of security incidents and response',
+        'Resilience': 'Organizational resilience and disaster recovery',
+        'Application & Software': 'Development and management of applications and software',
+        'Secure Software Development Lifecycle': 'Practices for secure software development',
+        # Add more descriptions as needed
+    }
+
+    # Preprocess domain names with enhanced descriptions
+    domain_texts1 = [preprocess_text(domain_descriptions.get(d, d)) for d in domains1]
+    domain_texts2 = [preprocess_text(domain_descriptions.get(d, d)) for d in domains2]
+
+    # Encode domains
+    domain_embeddings1 = model.encode(domain_texts1, convert_to_tensor=True)
+    domain_embeddings2 = model.encode(domain_texts2, convert_to_tensor=True)
+
+    # Compute semantic similarity matrix
+    domain_similarity_matrix = util.cos_sim(domain_embeddings1, domain_embeddings2).cpu().numpy()
+
+    # Compute fuzzy string similarity matrix
+    fuzzy_scores = []
+    for d1 in domains1:
+        scores = [fuzz.token_set_ratio(d1, d2) for d2 in domains2]
+        fuzzy_scores.append(scores)
+    fuzzy_similarity_matrix = np.array(fuzzy_scores) / 100  # Normalize to 0-1
+
+    # Combine similarities
+    combined_similarity_matrix = (domain_similarity_matrix * 0.6 + fuzzy_similarity_matrix * 0.4)
+
+    # Threshold for domain matching
+    domain_similarity_threshold = 0.44  # Adjusted threshold
+
+    # Match domains based on combined similarity and manual mappings
+    domain_mapping = {}
+    for idx1, d1 in enumerate(domains1):
+        if d1 in manual_domain_mapping:
+            domain_mapping[d1] = manual_domain_mapping[d1]
+            print(f"Manual mapping: {d1} --> {domain_mapping[d1]}")
         else:
-            return jsonify({'error': 'Invalid files uploaded.'}), 400
+            similarities = combined_similarity_matrix[idx1]
+            best_idx = similarities.argmax()
+            best_score = similarities[best_idx]
+            if best_score >= domain_similarity_threshold:
+                d2 = domains2[best_idx]
+                domain_mapping[d1] = d2
+                print(f"Matched {d1} --> {d2} (Similarity: {best_score:.2f})")
+            else:
+                print(f"No match for Domain: {d1} (Best score: {best_score:.2f})")
+
+    # Print matched domains for debugging
+    print("\nFinal Matched Domains:")
+    for d1, d2 in domain_mapping.items():
+        print(f"{d1} --> {d2}")
+
+    # Match Controls using Combined Similarity with Weights
+    results = []
+    tfidf_weight = 0.4
+    embedding_weight = 0.6  # Adjusted weight to emphasize embeddings
+    control_threshold = 0.35  # Adjusted threshold
+
+    # Loop Through Matched Domains
+    for domain_f1, domain_f2 in domain_mapping.items():
+        controls_f1 = df1[df1['Domain'] == domain_f1].reset_index(drop=True)
+        controls_f2 = df2[df2['Domain'] == domain_f2].reset_index(drop=True)
+
+        # Fallback Mechanism: If controls are empty, use all controls across all domains
+        if controls_f1.empty or controls_f2.empty:
+            print(f"No controls found for domain '{domain_f1}' or '{domain_f2}'. Using fallback to match across all domains.")
+            controls_f1 = df1.copy()
+            controls_f2 = df2.copy()
+            domain_f1 = 'All Domains'  # For reporting purposes
+
+        texts_f1 = controls_f1['Processed_Control'].tolist()
+        texts_f2 = controls_f2['Processed_Control'].tolist()
+
+        # Embedding Similarity
+        embeddings_f1 = model.encode(texts_f1, convert_to_tensor=True)
+        embeddings_f2 = model.encode(texts_f2, convert_to_tensor=True)
+        embedding_similarity = util.cos_sim(embeddings_f1, embeddings_f2).cpu().numpy()
+
+        # TF-IDF Similarity
+        vectorizer = TfidfVectorizer().fit(texts_f1 + texts_f2)
+        tfidf_f1 = vectorizer.transform(texts_f1)
+        tfidf_f2 = vectorizer.transform(texts_f2)
+        tfidf_similarity = cosine_similarity(tfidf_f1, tfidf_f2)
+
+        # Combined Similarity
+        combined_similarity = (embedding_similarity * embedding_weight +
+                               tfidf_similarity * tfidf_weight) / (embedding_weight + tfidf_weight)
+
+        for idx_f1, row_f1 in controls_f1.iterrows():
+            similarities = combined_similarity[idx_f1]
+            # Get indices of top_k highest similarities
+            top_indices = similarities.argsort()[-top_k:][::-1]
+            top_scores = similarities[top_indices]
+            # Filter matches based on threshold
+            matching_indices = [i for i, score in zip(top_indices, top_scores) if score >= control_threshold]
+            matching_controls = [controls_f2.iloc[i]['Control'] for i in matching_indices]
+            matching_scores = [similarities[i] for i in matching_indices]
+
+            if not matching_controls:
+                matching_controls = [None]
+                matching_scores = [None]
+
+            results.append({
+                'Domain': domain_f1,
+                'Sub-Domain': row_f1['Sub-Domain'],
+                'Control': row_f1['Control'],
+                'Controls from F2 that match': matching_controls,
+                'Similarity Scores': matching_scores
+            })
+
+    # Merge Results and Format Output
+    final_df = pd.DataFrame(results)
+    final_df = final_df.explode(['Controls from F2 that match', 'Similarity Scores'])
+    final_df = final_df.reset_index(drop=True)
+    final_df['Similarity Scores'] = final_df['Similarity Scores'].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else '')
+
+    # Save to CSV
+    output_path = os.path.join(OUTPUT_FOLDER, 'framework1_with_results.csv')
+    final_df.to_csv(output_path, index=False)
+    print(f"Results saved to {output_path}")
+
+    total_time = time.time() - start_time
+    print(f"Total processing time: {total_time:.2f} seconds")
+
+    # Return JSON response
+    return jsonify({"data": final_df.to_dict(orient='records'), "processing_time": f"{total_time:.2f} seconds"}), 200
+
+@app.route('/download/framework1_with_results.csv', methods=['GET'])
+def download_file():
+    output_path = os.path.join(OUTPUT_FOLDER, 'framework1_with_results.csv')
+    if not os.path.exists(output_path):
+        print("Error: File not found for download")
+        return jsonify({"error": "File not found"}), 404
+    print(f"File downloaded: {output_path}")
+    response = send_file(output_path, as_attachment=True)
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 if __name__ == '__main__':
     app.run(debug=True)
