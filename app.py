@@ -14,6 +14,11 @@ import os
 import time
 import shutil
 
+# Additional imports for formatting
+from openpyxl import load_workbook
+from openpyxl.styles import Font, Alignment
+from openpyxl.utils import get_column_letter
+
 app = Flask(__name__)
 CORS(app)
 
@@ -29,13 +34,11 @@ model = SentenceTransformer('all-mpnet-base-v2')
 lemmatizer = WordNetLemmatizer()
 stop_words = set(stopwords.words('english'))
 
-# Directories to save uploaded files and outputs
 UPLOAD_FOLDER = 'uploads'
 OUTPUT_FOLDER = 'output'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# Text Preprocessing Function
 def preprocess_text(text):
     if pd.isnull(text):
         return ''
@@ -75,13 +78,13 @@ def process_files():
     df1 = pd.read_excel(path1)
     df2 = pd.read_excel(path2)
 
-    # Forward-fill missing 'Domain' and 'Sub-Domain' values due to merged cells
+    # Forward-fill missing 'Domain' and 'Sub-Domain'
     df1['Domain'] = df1['Domain'].fillna(method='ffill')
     df2['Domain'] = df2['Domain'].fillna(method='ffill')
     df1['Sub-Domain'] = df1['Sub-Domain'].fillna(method='ffill')
     df2['Sub-Domain'] = df2['Sub-Domain'].fillna(method='ffill')
 
-    # Combine and Preprocess Text Columns
+    # Combine and Preprocess Text
     df1['Combined_Text'] = df1['Domain'].astype(str) + ' ' + df1['Sub-Domain'].astype(str) + ' ' + df1['Control'].astype(str)
     df2['Combined_Text'] = df2['Domain'].astype(str) + ' ' + df2['Sub-Domain'].astype(str) + ' ' + df2['Control'].astype(str)
 
@@ -92,47 +95,37 @@ def process_files():
     domains1 = df1['Domain'].dropna().unique().tolist()
     domains2 = df2['Domain'].dropna().unique().tolist()
 
-    # Define manual domain mappings (update as needed)
+    # Manual domain mappings
     manual_domain_mapping = {
         'Security Incident Management': 'Resilience',
         'Application & Software': 'Secure Software Development Lifecycle',
-        # Add more mappings as needed
     }
 
-    # Define domain descriptions for better context
+    # Domain descriptions
     domain_descriptions = {
         'Security Incident Management': 'Management of security incidents and response',
         'Resilience': 'Organizational resilience and disaster recovery',
         'Application & Software': 'Development and management of applications and software',
         'Secure Software Development Lifecycle': 'Practices for secure software development',
-        # Add more descriptions as needed
     }
 
-    # Preprocess domain names with enhanced descriptions
     domain_texts1 = [preprocess_text(domain_descriptions.get(d, d)) for d in domains1]
     domain_texts2 = [preprocess_text(domain_descriptions.get(d, d)) for d in domains2]
 
-    # Encode domains
     domain_embeddings1 = model.encode(domain_texts1, convert_to_tensor=True)
     domain_embeddings2 = model.encode(domain_texts2, convert_to_tensor=True)
 
-    # Compute semantic similarity matrix
     domain_similarity_matrix = util.cos_sim(domain_embeddings1, domain_embeddings2).cpu().numpy()
 
-    # Compute fuzzy string similarity matrix
     fuzzy_scores = []
     for d1 in domains1:
         scores = [fuzz.token_set_ratio(d1, d2) for d2 in domains2]
         fuzzy_scores.append(scores)
-    fuzzy_similarity_matrix = np.array(fuzzy_scores) / 100  # Normalize to 0-1
+    fuzzy_similarity_matrix = np.array(fuzzy_scores) / 100
 
-    # Combine similarities
     combined_similarity_matrix = (domain_similarity_matrix * 0.6 + fuzzy_similarity_matrix * 0.4)
+    domain_similarity_threshold = 0.44
 
-    # Threshold for domain matching
-    domain_similarity_threshold = 0.44  # Adjusted threshold
-
-    # Match domains based on combined similarity and manual mappings
     domain_mapping = {}
     for idx1, d1 in enumerate(domains1):
         if d1 in manual_domain_mapping:
@@ -149,53 +142,45 @@ def process_files():
             else:
                 print(f"No match for Domain: {d1} (Best score: {best_score:.2f})")
 
-    # Print matched domains for debugging
     print("\nFinal Matched Domains:")
     for d1, d2 in domain_mapping.items():
         print(f"{d1} --> {d2}")
 
-    # Match Controls using Combined Similarity with Weights
+    # Match Controls
     results = []
     tfidf_weight = 0.4
-    embedding_weight = 0.6  # Adjusted weight to emphasize embeddings
-    control_threshold = 0.35  # Adjusted threshold
+    embedding_weight = 0.6
+    control_threshold = 0.35
 
-    # Loop Through Matched Domains
     for domain_f1, domain_f2 in domain_mapping.items():
         controls_f1 = df1[df1['Domain'] == domain_f1].reset_index(drop=True)
         controls_f2 = df2[df2['Domain'] == domain_f2].reset_index(drop=True)
 
-        # Fallback Mechanism: If controls are empty, use all controls across all domains
         if controls_f1.empty or controls_f2.empty:
-            print(f"No controls found for domain '{domain_f1}' or '{domain_f2}'. Using fallback to match across all domains.")
+            print(f"No controls found for domain '{domain_f1}' or '{domain_f2}'. Fallback to all domains.")
             controls_f1 = df1.copy()
             controls_f2 = df2.copy()
-            domain_f1 = 'All Domains'  # For reporting purposes
+            domain_f1 = 'All Domains'
 
         texts_f1 = controls_f1['Processed_Control'].tolist()
         texts_f2 = controls_f2['Processed_Control'].tolist()
 
-        # Embedding Similarity
         embeddings_f1 = model.encode(texts_f1, convert_to_tensor=True)
         embeddings_f2 = model.encode(texts_f2, convert_to_tensor=True)
         embedding_similarity = util.cos_sim(embeddings_f1, embeddings_f2).cpu().numpy()
 
-        # TF-IDF Similarity
         vectorizer = TfidfVectorizer().fit(texts_f1 + texts_f2)
         tfidf_f1 = vectorizer.transform(texts_f1)
         tfidf_f2 = vectorizer.transform(texts_f2)
         tfidf_similarity = cosine_similarity(tfidf_f1, tfidf_f2)
 
-        # Combined Similarity
         combined_similarity = (embedding_similarity * embedding_weight +
                                tfidf_similarity * tfidf_weight) / (embedding_weight + tfidf_weight)
 
         for idx_f1, row_f1 in controls_f1.iterrows():
             similarities = combined_similarity[idx_f1]
-            # Get indices of top_k highest similarities
             top_indices = similarities.argsort()[-top_k:][::-1]
             top_scores = similarities[top_indices]
-            # Filter matches based on threshold
             matching_indices = [i for i, score in zip(top_indices, top_scores) if score >= control_threshold]
             matching_controls = [controls_f2.iloc[i]['Control'] for i in matching_indices]
             matching_scores = [similarities[i] for i in matching_indices]
@@ -212,26 +197,61 @@ def process_files():
                 'Similarity Scores': matching_scores
             })
 
-    # Merge Results and Format Output
     final_df = pd.DataFrame(results)
     final_df = final_df.explode(['Controls from F2 that match', 'Similarity Scores'])
     final_df = final_df.reset_index(drop=True)
     final_df['Similarity Scores'] = final_df['Similarity Scores'].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else '')
 
-    # Save to CSV
-    output_path = os.path.join(OUTPUT_FOLDER, 'framework1_with_results.csv')
-    final_df.to_csv(output_path, index=False)
-    print(f"Results saved to {output_path}")
+    final_df['Sr No.'] = final_df.index + 1
+    final_df = final_df.rename(columns={
+        'Domain': 'User Org Domain',
+        'Sub-Domain': 'User Org Sub-Domain',
+        'Control': 'User Org Control Statement',
+        'Controls from F2 that match': 'Matched Control from Service Org Framework',
+        'Similarity Scores': 'Similarity Score'
+    })
 
+    final_df = final_df[['Sr No.', 'User Org Domain', 'User Org Sub-Domain', 'User Org Control Statement',
+                         'Matched Control from Service Org Framework', 'Similarity Score']]
+
+    output_path = os.path.join(OUTPUT_FOLDER, 'framework1_with_results.xlsx')
+    final_df.to_excel(output_path, index=False)
+
+    # Formatting with openpyxl
+    wb = load_workbook(output_path)
+    ws = wb.active
+
+    # Bold headers
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
+    # Wrap text for all cells
+    wrap_alignment = Alignment(wrap_text=True)
+    for row in ws.iter_rows():
+        for cell in row:
+            cell.alignment = wrap_alignment
+
+    # Set column widths based only on header length
+    # Add some padding to ensure readability
+    for i, col_name in enumerate(final_df.columns, start=1):
+        header_length = len(col_name)
+        # Add padding
+        ws.column_dimensions[get_column_letter(i)].width = header_length + 5
+
+    wb.save(output_path)
+
+    print(f"Results saved to {output_path}")
     total_time = time.time() - start_time
     print(f"Total processing time: {total_time:.2f} seconds")
 
-    # Return JSON response
-    return jsonify({"data": final_df.to_dict(orient='records'), "processing_time": f"{total_time:.2f} seconds"}), 200
+    return jsonify({
+        "data": final_df.to_dict(orient='records'),
+        "processing_time": f"{total_time:.2f} seconds"
+    }), 200
 
-@app.route('/download/framework1_with_results.csv', methods=['GET'])
+@app.route('/download/framework1_with_results.xlsx', methods=['GET'])
 def download_file():
-    output_path = os.path.join(OUTPUT_FOLDER, 'framework1_with_results.csv')
+    output_path = os.path.join(OUTPUT_FOLDER, 'framework1_with_results.xlsx')
     if not os.path.exists(output_path):
         print("Error: File not found for download")
         return jsonify({"error": "File not found"}), 404
