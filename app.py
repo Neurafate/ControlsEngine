@@ -235,7 +235,6 @@ def process_files():
     # Add some padding to ensure readability
     for i, col_name in enumerate(final_df.columns, start=1):
         header_length = len(col_name)
-        # Add padding
         ws.column_dimensions[get_column_letter(i)].width = header_length + 5
 
     wb.save(output_path)
@@ -249,7 +248,8 @@ def process_files():
         "processing_time": f"{total_time:.2f} seconds"
     }), 200
 
-@app.route('/download/framework1_with_results.xlsx', methods=['GET'])
+# Updated download route so that the file is served directly from the base URL
+@app.route('/framework1_with_results.xlsx', methods=['GET'])
 def download_file():
     output_path = os.path.join(OUTPUT_FOLDER, 'framework1_with_results.xlsx')
     if not os.path.exists(output_path):
@@ -261,7 +261,6 @@ def download_file():
     response.headers['Pragma'] = 'no-cache'
     response.headers['Expires'] = '0'
     return response
-    
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001, threaded=True, debug=False)
-
