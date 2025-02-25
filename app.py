@@ -262,5 +262,6 @@ def download_file():
     response.headers['Expires'] = '0'
     return response
     
-if __name__ == '__main__':
-    app.run(debug=False, port=5001)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5001, threaded=True, debug=False)
+
